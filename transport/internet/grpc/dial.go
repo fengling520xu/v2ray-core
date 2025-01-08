@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 
 	core "github.com/v2fly/v2ray-core/v5"
 	"github.com/v2fly/v2ray-core/v5/common"
@@ -48,13 +49,14 @@ func dialgRPC(ctx context.Context, dest net.Destination, streamSettings *interne
 	grpcSettings := streamSettings.ProtocolSettings.(*Config)
 
 	config := tls.ConfigFromStreamSettings(streamSettings)
-	dialOption := grpc.WithInsecure()
 
+	transportCredentials := insecure.NewCredentials()
 	if config != nil {
-		dialOption = grpc.WithTransportCredentials(credentials.NewTLS(config.GetTLSConfig()))
+		transportCredentials = credentials.NewTLS(config.GetTLSConfig(tls.WithDestination(dest)))
 	}
+	dialOption := grpc.WithTransportCredentials(transportCredentials)
 
-	conn, canceller, err := getGrpcClient(ctx, dest, dialOption)
+	conn, canceller, err := getGrpcClient(ctx, dest, dialOption, streamSettings)
 	if err != nil {
 		return nil, newError("Cannot dial grpc").Base(err)
 	}
@@ -67,7 +69,7 @@ func dialgRPC(ctx context.Context, dest net.Destination, streamSettings *interne
 	return encoding.NewGunConn(gunService, nil), nil
 }
 
-func getGrpcClient(ctx context.Context, dest net.Destination, dialOption grpc.DialOption) (*grpc.ClientConn, dialerCanceller, error) {
+func getGrpcClient(ctx context.Context, dest net.Destination, dialOption grpc.DialOption, streamSettings *internet.MemoryStreamConfig) (*grpc.ClientConn, dialerCanceller, error) {
 	globalDialerAccess.Lock()
 	defer globalDialerAccess.Unlock()
 
@@ -112,7 +114,7 @@ func getGrpcClient(ctx context.Context, dest net.Destination, dialOption grpc.Di
 			}
 			address := net.ParseAddress(rawHost)
 			detachedContext := core.ToBackgroundDetachedContext(ctx)
-			return internet.DialSystem(detachedContext, net.TCPDestination(address, port), nil)
+			return internet.DialSystem(detachedContext, net.TCPDestination(address, port), streamSettings.SocketSettings)
 		}),
 	)
 	globalDialerMap[dest] = conn

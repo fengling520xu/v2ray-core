@@ -87,6 +87,9 @@ message StrategyWeight {
 message StrategyRandomConfig {
   option (v2ray.core.common.protoext.message_opt).type = "balancer";
   option (v2ray.core.common.protoext.message_opt).short_name = "random";
+
+  string observer_tag = 7;
+  bool alive_only = 8;
 }
 
 message StrategyLeastPingConfig {
@@ -156,7 +159,7 @@ message SimplifiedRoutingRule {
   string port_list = 14;
 
   // List of networks for matching.
-  string networks = 13;
+  v2ray.core.common.net.NetworkList networks = 13;
 
   // List of GeoIPs for source IP address matching. If this entry exists, the
   // source_cidr above will have no effect.

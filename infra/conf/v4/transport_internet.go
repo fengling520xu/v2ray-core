@@ -137,6 +137,12 @@ func (c *TCPConfig) Build() (proto.Message, error) {
 	return config, nil
 }
 
+type Hy2ConfigCongestion struct {
+	Type     string `json:"type"`
+	UpMbps   uint64 `json:"up_mbps"`
+	DownMbps uint64 `json:"down_mbps"`
+}
+
 type WebSocketConfig struct {
 	Path                 string            `json:"path"`
 	Headers              map[string]string `json:"headers"`

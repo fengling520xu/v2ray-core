@@ -13,8 +13,6 @@ import (
 	"github.com/v2fly/v2ray-core/v5/common/net"
 	"github.com/v2fly/v2ray-core/v5/common/serial"
 	"github.com/v2fly/v2ray-core/v5/infra/conf/cfgcommon/testassist"
-
-	// Geo loaders
 	_ "github.com/v2fly/v2ray-core/v5/infra/conf/geodata/memconservative"
 	_ "github.com/v2fly/v2ray-core/v5/infra/conf/geodata/standard"
 	router2 "github.com/v2fly/v2ray-core/v5/infra/conf/synthetic/router"
@@ -115,6 +113,7 @@ func TestRouterConfig(t *testing.T) {
 						Tag:              "b1",
 						OutboundSelector: []string{"test"},
 						Strategy:         "random",
+						StrategySettings: serial.ToTypedMessage(&router.StrategyRandomConfig{}),
 					},
 					{
 						Tag:              "b2",

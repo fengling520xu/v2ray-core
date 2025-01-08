@@ -55,9 +55,12 @@ func filterMessage(ctx context.Context, message protoreflect.Message) error {
 			if v2extension.ConvertTimeParseIp != "" {
 				ipValue := net.ParseIP(value.String())
 				target := message.Descriptor().Fields().ByTextName(v2extension.ConvertTimeParseIp)
+				if ipValue.To4() != nil {
+					ipValue = ipValue.To4()
+				}
 				pendingWriteQueue = append(pendingWriteQueue, pendingWrite{
 					field: target,
-					value: protoreflect.ValueOf(ipValue),
+					value: protoreflect.ValueOf([]byte(ipValue)),
 				})
 			}
 		}
@@ -82,8 +85,11 @@ func filterMessage(ctx context.Context, message protoreflect.Message) error {
 	}
 
 	fsenvironment := envctx.EnvironmentFromContext(ctx)
-	fsifce := fsenvironment.(filesystemcap.FileSystemCapabilitySet)
+	fsifce, fsifceOk := fsenvironment.(filesystemcap.FileSystemCapabilitySet)
 	for _, v := range fileReadingQueue {
+		if !fsifceOk {
+			return newError("unable to read file as filesystem capability is not given")
+		}
 		field := message.Descriptor().Fields().ByTextName(v.field)
 		if v.filename == "" {
 			continue
