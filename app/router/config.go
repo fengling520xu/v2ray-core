@@ -46,6 +46,18 @@ func (rr *RoutingRule) BuildCondition() (Condition, error) {
 		conds.Add(cond)
 	}
 
+	var geoDomains []*routercommon.Domain
+	for _, geo := range rr.GeoDomain {
+		geoDomains = append(geoDomains, geo.Domain...)
+	}
+	if len(geoDomains) > 0 {
+		cond, err := NewDomainMatcher(rr.DomainMatcher, geoDomains)
+		if err != nil {
+			return nil, newError("failed to build geo domain condition").Base(err)
+		}
+		conds.Add(cond)
+	}
+
 	if len(rr.UserEmail) > 0 {
 		conds.Add(NewUserMatcher(rr.UserEmail))
 	}
@@ -132,7 +144,7 @@ func (br *BalancingRule) Build(ohm outbound.Manager, dispatcher routing.Dispatch
 		return &Balancer{
 			selectors: br.OutboundSelector,
 			strategy:  &LeastPingStrategy{config: s},
-			ohm:       ohm,
+			ohm:       ohm, fallbackTag: br.FallbackTag,
 		}, nil
 	case "leastload":
 		i, err := serial.GetInstanceOf(br.StrategySettings)
@@ -152,10 +164,22 @@ func (br *BalancingRule) Build(ohm outbound.Manager, dispatcher routing.Dispatch
 	case "random":
 		fallthrough
 	case "":
+		var randomStrategy *RandomStrategy
+		if br.StrategySettings != nil {
+			i, err := serial.GetInstanceOf(br.StrategySettings)
+			if err != nil {
+				return nil, err
+			}
+			s, ok := i.(*StrategyRandomConfig)
+			if !ok {
+				return nil, newError("not a StrategyRandomConfig").AtError()
+			}
+			randomStrategy = NewRandomStrategy(s)
+		}
 		return &Balancer{
 			selectors: br.OutboundSelector,
 			ohm:       ohm, fallbackTag: br.FallbackTag,
-			strategy: &RandomStrategy{},
+			strategy: randomStrategy,
 		}, nil
 	default:
 		return nil, newError("unrecognized balancer type")

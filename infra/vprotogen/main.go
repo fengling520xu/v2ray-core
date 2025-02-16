@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
 	"go/build"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
@@ -46,7 +48,7 @@ func GetRuntimeEnv(key string) (string, error) {
 	}
 	var data []byte
 	var runtimeEnv string
-	data, readErr := ioutil.ReadFile(file)
+	data, readErr := os.ReadFile(file)
 	if readErr != nil {
 		return "", readErr
 	}
@@ -91,7 +93,7 @@ Command "%s" not found.
 Make sure that %s is in your system path or current path.
 Download %s v%s or later from https://github.com/protocolbuffers/protobuf/releases
 `, protoc, protoc, protoc, targetedVersion)
-		return "", fmt.Errorf(errStr)
+		return "", fmt.Errorf("%v", errStr)
 	}
 	return path, nil
 }
@@ -106,9 +108,9 @@ func getProjectProtocVersion(url string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("can not read from body")
 	}
-	versionRegexp := regexp.MustCompile(`\/\/\s*protoc\s*v(\d+\.\d+\.\d+)`)
+	versionRegexp := regexp.MustCompile(`\/\/\s*protoc\s*v(\d+\.(\d+\.\d+))`)
 	matched := versionRegexp.FindStringSubmatch(string(body))
-	return matched[1], nil
+	return matched[2], nil
 }
 
 func getInstalledProtocVersion(protocPath string) (string, error) {
@@ -118,9 +120,15 @@ func getInstalledProtocVersion(protocPath string) (string, error) {
 	if cmdErr != nil {
 		return "", cmdErr
 	}
-	versionRegexp := regexp.MustCompile(`protoc\s*(\d+\.\d+\.\d+)`)
+	versionRegexp := regexp.MustCompile(`protoc\s*(\d+\.\d+(\.\d)*)`)
 	matched := versionRegexp.FindStringSubmatch(string(output))
-	return matched[1], nil
+	installedVersion := ""
+	if len(matched) == 0 {
+		return "", errors.New("can not parse protoc version")
+	}
+	installedVersion += matched[1]
+	fmt.Println("Using protoc version: " + installedVersion)
+	return installedVersion, nil
 }
 
 func parseVersion(s string, width int) int64 {
@@ -247,4 +255,66 @@ Download it from https://github.com/protocolbuffers/protobuf/releases
 			}
 		}
 	}
+
+	normalizeWalkErr := filepath.Walk("./", func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			fmt.Println(err)
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		filename := filepath.Base(path)
+		if strings.HasSuffix(filename, ".pb.go") &&
+			path != "config.pb.go" {
+			if err := NormalizeGeneratedProtoFile(path); err != nil {
+				fmt.Println(err)
+				os.Exit(1)
+			}
+		}
+
+		return nil
+	})
+	if normalizeWalkErr != nil {
+		fmt.Println(normalizeWalkErr)
+		os.Exit(1)
+	}
+}
+
+func NormalizeGeneratedProtoFile(path string) error {
+	fd, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+
+	_, err = fd.Seek(0, os.SEEK_SET)
+	if err != nil {
+		return err
+	}
+	out := bytes.NewBuffer(nil)
+	scanner := bufio.NewScanner(fd)
+	valid := false
+	for scanner.Scan() {
+		if !valid && !strings.HasPrefix(scanner.Text(), "package ") {
+			continue
+		}
+		valid = true
+		out.Write(scanner.Bytes())
+		out.Write([]byte("\n"))
+	}
+	_, err = fd.Seek(0, os.SEEK_SET)
+	if err != nil {
+		return err
+	}
+	err = fd.Truncate(0)
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(fd, bytes.NewReader(out.Bytes()))
+	if err != nil {
+		return err
+	}
+	return nil
 }

@@ -3,9 +3,16 @@ package core
 import (
 	"context"
 	"reflect"
-	"sync"
+	sync "sync"
+
+	"github.com/v2fly/v2ray-core/v5/common/environment/deferredpersistentstorage"
+	"github.com/v2fly/v2ray-core/v5/common/environment/filesystemimpl"
+	"github.com/v2fly/v2ray-core/v5/features/extension/storage"
 
 	"github.com/v2fly/v2ray-core/v5/common"
+	"github.com/v2fly/v2ray-core/v5/common/environment"
+	"github.com/v2fly/v2ray-core/v5/common/environment/systemnetworkimpl"
+	"github.com/v2fly/v2ray-core/v5/common/environment/transientstorageimpl"
 	"github.com/v2fly/v2ray-core/v5/common/serial"
 	"github.com/v2fly/v2ray-core/v5/features"
 	"github.com/v2fly/v2ray-core/v5/features/dns"
@@ -90,13 +97,15 @@ type Instance struct {
 	features           []features.Feature
 	featureResolutions []resolution
 	running            bool
+	env                environment.RootEnvironment
 
 	ctx context.Context
 }
 
 func AddInboundHandler(server *Instance, config *InboundHandlerConfig) error {
 	inboundManager := server.GetFeature(inbound.ManagerType()).(inbound.Manager)
-	rawHandler, err := CreateObject(server, config)
+	proxyEnv := server.env.ProxyEnvironment("i" + config.Tag)
+	rawHandler, err := CreateObjectWithEnvironment(server, config, proxyEnv)
 	if err != nil {
 		return err
 	}
@@ -122,7 +131,8 @@ func addInboundHandlers(server *Instance, configs []*InboundHandlerConfig) error
 
 func AddOutboundHandler(server *Instance, config *OutboundHandlerConfig) error {
 	outboundManager := server.GetFeature(outbound.ManagerType()).(outbound.Manager)
-	rawHandler, err := CreateObject(server, config)
+	proxyEnv := server.env.ProxyEnvironment("o" + config.Tag)
+	rawHandler, err := CreateObjectWithEnvironment(server, config, proxyEnv)
 	if err != nil {
 		return err
 	}
@@ -131,6 +141,18 @@ func AddOutboundHandler(server *Instance, config *OutboundHandlerConfig) error {
 		return newError("not an OutboundHandler")
 	}
 	if err := outboundManager.AddHandler(server.ctx, handler); err != nil {
+		return err
+	}
+	return nil
+}
+
+func RemoveOutboundHandler(server *Instance, tag string) error {
+	outboundManager := server.GetFeature(outbound.ManagerType()).(outbound.Manager)
+	if err := outboundManager.RemoveHandler(server.ctx, tag); err != nil {
+		return err
+	}
+
+	if err := server.env.DropProxyEnvironment("o" + tag); err != nil {
 		return err
 	}
 	return nil
@@ -186,12 +208,24 @@ func initInstanceWithConfig(config *Config, server *Instance) (bool, error) {
 		return true, err
 	}
 
+	defaultNetworkImpl := systemnetworkimpl.NewSystemNetworkDefault()
+	defaultFilesystemImpl := filesystemimpl.NewDefaultFileSystemDefaultImpl()
+	deferredPersistentStorageImpl := deferredpersistentstorage.NewDeferredPersistentStorage(server.ctx)
+	server.env = environment.NewRootEnvImpl(server.ctx,
+		transientstorageimpl.NewScopedTransientStorageImpl(),
+		defaultNetworkImpl.Dialer(),
+		defaultNetworkImpl.Listener(),
+		defaultFilesystemImpl,
+		deferredPersistentStorageImpl)
+
 	for _, appSettings := range config.App {
 		settings, err := serial.GetInstanceOf(appSettings)
 		if err != nil {
 			return true, err
 		}
-		obj, err := CreateObject(server, settings)
+		key := appSettings.TypeUrl
+		appEnv := server.env.AppEnvironment(key)
+		obj, err := CreateObjectWithEnvironment(server, settings, appEnv)
 		if err != nil {
 			return true, err
 		}
@@ -222,6 +256,12 @@ func initInstanceWithConfig(config *Config, server *Instance) (bool, error) {
 
 	if server.featureResolutions != nil {
 		return true, newError("not all dependency are resolved.")
+	}
+
+	if persistentStorageService := server.GetFeature(storage.ScopedPersistentStorageServiceType); persistentStorageService != nil {
+		deferredPersistentStorageImpl.ProvideInner(server.ctx, persistentStorageService.(storage.ScopedPersistentStorage))
+	} else {
+		deferredPersistentStorageImpl.ProvideInner(server.ctx, nil)
 	}
 
 	if err := addInboundHandlers(server, config.Inbound); err != nil {

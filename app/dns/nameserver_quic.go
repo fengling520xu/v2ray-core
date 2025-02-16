@@ -1,15 +1,15 @@
 package dns
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"net/url"
 	"sync"
-	"sync/atomic"
 	"time"
 
-	"github.com/lucas-clemente/quic-go"
+	"github.com/quic-go/quic-go"
 	"golang.org/x/net/dns/dnsmessage"
-	"golang.org/x/net/http2"
 
 	"github.com/v2fly/v2ray-core/v5/common"
 	"github.com/v2fly/v2ray-core/v5/common/buf"
@@ -23,8 +23,8 @@ import (
 )
 
 // NextProtoDQ - During connection establishment, DNS/QUIC support is indicated
-// by selecting the ALPN token "dq" in the crypto handshake.
-const NextProtoDQ = "doq-i00"
+// by selecting the ALPN token "doq" in the crypto handshake.
+const NextProtoDQ = "doq"
 
 const handshakeIdleTimeout = time.Second * 8
 
@@ -34,10 +34,9 @@ type QUICNameServer struct {
 	ips         map[string]record
 	pub         *pubsub.Service
 	cleanup     *task.Periodic
-	reqID       uint32
 	name        string
 	destination net.Destination
-	session     quic.Session
+	connection  quic.Connection
 }
 
 // NewQUICNameServer creates DNS-over-QUIC client object for local resolving
@@ -45,7 +44,7 @@ func NewQUICNameServer(url *url.URL) (*QUICNameServer, error) {
 	newError("DNS: created Local DNS-over-QUIC client for ", url.String()).AtInfo().WriteToLog()
 
 	var err error
-	port := net.Port(784)
+	port := net.Port(853)
 	if url.Port() != "" {
 		port, err = net.PortFromString(url.Port())
 		if err != nil {
@@ -148,7 +147,7 @@ func (s *QUICNameServer) updateIP(req *dnsRequest, ipRec *IPRecord) {
 }
 
 func (s *QUICNameServer) newReqID() uint16 {
-	return uint16(atomic.AddUint32(&s.reqID, 1))
+	return 0
 }
 
 func (s *QUICNameServer) sendQuery(ctx context.Context, domain string, clientIP net.IP, option dns_feature.IPOption) {
@@ -189,13 +188,18 @@ func (s *QUICNameServer) sendQuery(ctx context.Context, domain string, clientIP 
 				return
 			}
 
+			dnsReqBuf := buf.New()
+			binary.Write(dnsReqBuf, binary.BigEndian, uint16(b.Len()))
+			dnsReqBuf.Write(b.Bytes())
+			b.Release()
+
 			conn, err := s.openStream(dnsCtx)
 			if err != nil {
-				newError("failed to open quic session").Base(err).AtError().WriteToLog()
+				newError("failed to open quic connection").Base(err).AtError().WriteToLog()
 				return
 			}
 
-			_, err = conn.Write(b.Bytes())
+			_, err = conn.Write(dnsReqBuf.Bytes())
 			if err != nil {
 				newError("failed to send query").Base(err).AtError().WriteToLog()
 				return
@@ -205,9 +209,21 @@ func (s *QUICNameServer) sendQuery(ctx context.Context, domain string, clientIP 
 
 			respBuf := buf.New()
 			defer respBuf.Release()
-			n, err := respBuf.ReadFrom(conn)
+			n, err := respBuf.ReadFullFrom(conn, 2)
 			if err != nil && n == 0 {
-				newError("failed to read response").Base(err).AtError().WriteToLog()
+				newError("failed to read response length").Base(err).AtError().WriteToLog()
+				return
+			}
+			var length int16
+			err = binary.Read(bytes.NewReader(respBuf.Bytes()), binary.BigEndian, &length)
+			if err != nil {
+				newError("failed to parse response length").Base(err).AtError().WriteToLog()
+				return
+			}
+			respBuf.Clear()
+			n, err = respBuf.ReadFullFrom(conn, int32(length))
+			if err != nil && n == 0 {
+				newError("failed to read response length").Base(err).AtError().WriteToLog()
 				return
 			}
 
@@ -232,20 +248,20 @@ func (s *QUICNameServer) findIPsForDomain(domain string, option dns_feature.IPOp
 
 	var ips []net.Address
 	var lastErr error
-	if option.IPv6Enable && record.AAAA != nil && record.AAAA.RCode == dnsmessage.RCodeSuccess {
-		aaaa, err := record.AAAA.getIPs()
-		if err != nil {
-			lastErr = err
-		}
-		ips = append(ips, aaaa...)
-	}
-
-	if option.IPv4Enable && record.A != nil && record.A.RCode == dnsmessage.RCodeSuccess {
+	if option.IPv4Enable {
 		a, err := record.A.getIPs()
 		if err != nil {
 			lastErr = err
 		}
 		ips = append(ips, a...)
+	}
+
+	if option.IPv6Enable {
+		aaaa, err := record.AAAA.getIPs()
+		if err != nil {
+			lastErr = err
+		}
+		ips = append(ips, aaaa...)
 	}
 
 	if len(ips) > 0 {
@@ -256,11 +272,7 @@ func (s *QUICNameServer) findIPsForDomain(domain string, option dns_feature.IPOp
 		return nil, lastErr
 	}
 
-	if (option.IPv4Enable && record.A != nil) || (option.IPv6Enable && record.AAAA != nil) {
-		return nil, dns_feature.ErrEmptyResponse
-	}
-
-	return nil, errRecordNotFound
+	return nil, dns_feature.ErrEmptyResponse
 }
 
 // QueryIP is called from dns.Server->queryIPTimeout
@@ -319,7 +331,7 @@ func (s *QUICNameServer) QueryIP(ctx context.Context, domain string, clientIP ne
 	}
 }
 
-func isActive(s quic.Session) bool {
+func isActive(s quic.Connection) bool {
 	select {
 	case <-s.Context().Done():
 		return false
@@ -328,17 +340,17 @@ func isActive(s quic.Session) bool {
 	}
 }
 
-func (s *QUICNameServer) getSession(ctx context.Context) (quic.Session, error) {
-	var session quic.Session
+func (s *QUICNameServer) getConnection(ctx context.Context) (quic.Connection, error) {
+	var conn quic.Connection
 	s.RLock()
-	session = s.session
-	if session != nil && isActive(session) {
+	conn = s.connection
+	if conn != nil && isActive(conn) {
 		s.RUnlock()
-		return session, nil
+		return conn, nil
 	}
-	if session != nil {
-		// we're recreating the session, let's create a new one
-		_ = session.CloseWithError(0, "")
+	if conn != nil {
+		// we're recreating the connection, let's create a new one
+		_ = conn.CloseWithError(0, "")
 	}
 	s.RUnlock()
 
@@ -346,42 +358,53 @@ func (s *QUICNameServer) getSession(ctx context.Context) (quic.Session, error) {
 	defer s.Unlock()
 
 	var err error
-	session, err = s.openSession(ctx)
+	conn, err = s.openConnection(ctx)
 	if err != nil {
 		// This does not look too nice, but QUIC (or maybe quic-go)
 		// doesn't seem stable enough.
 		// Maybe retransmissions aren't fully implemented in quic-go?
 		// Anyways, the simple solution is to make a second try when
-		// it fails to open the QUIC session.
-		session, err = s.openSession(ctx)
+		// it fails to open the QUIC connection.
+		conn, err = s.openConnection(ctx)
 		if err != nil {
 			return nil, err
 		}
 	}
-	s.session = session
-	return session, nil
+	s.connection = conn
+	return conn, nil
 }
 
-func (s *QUICNameServer) openSession(ctx context.Context) (quic.Session, error) {
-	tlsConfig := tls.Config{}
+func (s *QUICNameServer) openConnection(ctx context.Context) (quic.Connection, error) {
+	tlsConfig := tls.Config{
+		ServerName: func() string {
+			switch s.destination.Address.Family() {
+			case net.AddressFamilyIPv4, net.AddressFamilyIPv6:
+				return s.destination.Address.IP().String()
+			case net.AddressFamilyDomain:
+				return s.destination.Address.Domain()
+			default:
+				panic("unknown address family")
+			}
+		}(),
+	}
 	quicConfig := &quic.Config{
 		HandshakeIdleTimeout: handshakeIdleTimeout,
 	}
 
-	session, err := quic.DialAddrContext(ctx, s.destination.NetAddr(), tlsConfig.GetTLSConfig(tls.WithNextProto("http/1.1", http2.NextProtoTLS, NextProtoDQ)), quicConfig)
+	conn, err := quic.DialAddr(ctx, s.destination.NetAddr(), tlsConfig.GetTLSConfig(tls.WithNextProto(NextProtoDQ)), quicConfig)
 	if err != nil {
 		return nil, err
 	}
 
-	return session, nil
+	return conn, nil
 }
 
 func (s *QUICNameServer) openStream(ctx context.Context) (quic.Stream, error) {
-	session, err := s.getSession(ctx)
+	conn, err := s.getConnection(ctx)
 	if err != nil {
 		return nil, err
 	}
 
 	// open a new stream
-	return session.OpenStreamSync(ctx)
+	return conn.OpenStreamSync(ctx)
 }

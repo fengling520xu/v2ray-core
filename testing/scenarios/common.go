@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/proxy"
+
 	"google.golang.org/protobuf/proto"
 
 	core "github.com/v2fly/v2ray-core/v5"
@@ -24,6 +26,7 @@ import (
 	"github.com/v2fly/v2ray-core/v5/common/net"
 	"github.com/v2fly/v2ray-core/v5/common/retry"
 	"github.com/v2fly/v2ray-core/v5/common/serial"
+	"github.com/v2fly/v2ray-core/v5/common/units"
 )
 
 func xor(b []byte) []byte {
@@ -167,6 +170,26 @@ func withDefaultApps(config *core.Config) *core.Config {
 	return config
 }
 
+func testTCPConnViaSocks(socksPort, testPort net.Port, payloadSize int, timeout time.Duration) func() error { //nolint: unparam
+	return func() error {
+		socksDialer, err := proxy.SOCKS5("tcp", "127.0.0.1:"+socksPort.String(), nil, nil)
+		if err != nil {
+			return err
+		}
+		destAddr := &net.TCPAddr{
+			IP:   []byte{127, 0, 0, 1},
+			Port: int(testPort),
+		}
+		conn, err := socksDialer.Dial("tcp", destAddr.String())
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+
+		return testTCPConn2(conn, payloadSize, timeout)()
+	}
+}
+
 func testTCPConn(port net.Port, payloadSize int, timeout time.Duration) func() error {
 	return func() error {
 		conn, err := net.DialTCP("tcp", nil, &net.TCPAddr{
@@ -198,7 +221,18 @@ func testUDPConn(port net.Port, payloadSize int, timeout time.Duration) func() e
 }
 
 func testTCPConn2(conn net.Conn, payloadSize int, timeout time.Duration) func() error {
-	return func() error {
+	return func() (err1 error) {
+		start := time.Now()
+		defer func() {
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			// For info on each, see: https://golang.org/pkg/runtime/#MemStats
+			fmt.Println("testConn finishes:", time.Since(start).Milliseconds(), "ms\t",
+				err1, "\tAlloc =", units.ByteSize(m.Alloc).String(),
+				"\tTotalAlloc =", units.ByteSize(m.TotalAlloc).String(),
+				"\tSys =", units.ByteSize(m.Sys).String(),
+				"\tNumGC =", m.NumGC)
+		}()
 		payload := make([]byte, payloadSize)
 		common.Must2(rand.Read(payload))
 

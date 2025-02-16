@@ -3,6 +3,7 @@ package filesystem
 import (
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/v2fly/v2ray-core/v5/common/buf"
 	"github.com/v2fly/v2ray-core/v5/common/platform"
@@ -18,8 +19,16 @@ var NewFileReader fsifce.FileReaderFunc = func(path string) (io.ReadCloser, erro
 }
 
 var NewFileWriter fsifce.FileWriterFunc = func(path string) (io.WriteCloser, error) {
+	basePath := filepath.Dir(path)
+	if err := os.MkdirAll(basePath, 0o700); err != nil {
+		return nil, err
+	}
 	return os.Create(path)
 }
+
+var NewFileRemover fsifce.FileRemoveFunc = os.Remove
+
+var NewFileReadDir fsifce.FileReadDirFunc = os.ReadDir
 
 func ReadFile(path string) ([]byte, error) {
 	reader, err := NewFileReader(path)
@@ -45,12 +54,12 @@ func ReadAsset(file string) ([]byte, error) {
 	return ReadFile(platform.GetAssetLocation(file))
 }
 
-func CopyFile(dst string, src string) error {
+func CopyFile(dst string, src string, perm os.FileMode) error {
 	bytes, err := ReadFile(src)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY, perm)
 	if err != nil {
 		return err
 	}
